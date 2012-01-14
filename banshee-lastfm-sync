@@ -1,0 +1,194 @@
+#!/usr/bin/env perl
+
+package Banshee::LastFm::Sync;
+
+use Data::Dump;
+
+use common::sense;
+use Net::LastFMAPI;
+use Data::Types qw(:int);
+use DBI;
+use Try::Tiny;
+use Term::ProgressBar;
+use File::Copy;
+use Moose;
+
+
+with 'MooseX::Getopt';
+
+has key => ( is => "rw", isa => "Str", required => 1 );
+has username => ( is => "rw", isa => "Str", required => 1 );
+has db => ( is => "rw", isa => "Str", required => 1 );
+has zero => ( is => "rw", isa => "Bool", required => 0, default => sub { 0 } );
+has _config => ( is => "rw", lazy_build => 1, required => 0 );
+has _debug => ( is => "rw", isa => "Bool", default => sub{ 0 }, accessor => "debug" );
+
+__PACKAGE__->meta->make_immutable;
+binmode STDOUT, ":utf8";
+
+#
+# builders
+#
+sub _build_config {
+	my $self = shift;
+
+	lastfm_config(
+		api_key => $self->key,
+		secret => $self->secret
+	);
+}
+
+=item backup
+	create backup of database
+=cut
+sub backup {
+	my ( $self ) = @_;
+
+	#
+	# check if database file exists
+	#
+	unless( -f $self->db ) {
+		say "Database file ${\$self->db} doesn't exists";
+		exit(1);
+	}
+
+	#
+	# just copy file with .backup postfix
+	#
+	my $backup = sprintf "%s.backup", $self->db;
+	copy( $self->db, $backup );
+	say "Creating backup $backup";
+}
+
+sub sync {
+	my( $self ) = @_;
+
+	#
+	# independent counter
+	#
+	my $counter = 1;
+	my $total = 0;
+
+	#
+	# only tracks with 0 playcount
+	#
+	my $zero  = "";
+	$zero = "AND t.PlayCount = 0" if( $self->zero );
+
+	#
+	# check if database file exists
+	#
+	unless( -f $self->db ) {
+		say "Database file ${\$self->db} doesn't exists";
+		exit(1);
+	}
+
+	#
+	# iterate on track
+	#
+	my $dbh = DBI->connect( sprintf("dbi:SQLite:dbname=%s", $self->db ) , "", "" );
+	$dbh->{sqlite_unicode} = 1;
+
+	#
+	# count affected rows for progress bar, let me know if You know any other way
+	#
+	my $sth = $dbh->prepare( qq{
+		SELECT
+			count( * ) AS count
+		FROM
+			CoreTracks t,
+			CoreArtists a,
+			CorePrimarySources s
+		WHERE
+			t.ArtistID = a.ArtistID AND
+			t.PrimarySourceID = s.PrimarySourceID AND
+			s.StringID = 'MusicLibrarySource-Library'
+			$zero
+	} );
+	$sth->execute;
+	$total = $sth->fetchrow_hashref()->{ "count" };
+	$sth->finish;
+
+	say "Found $total tracks to process";
+	#
+	# real query
+	#
+	$sth = $dbh->prepare( qq{
+		SELECT
+			*
+		FROM
+			CoreTracks t,
+			CoreArtists a,
+			CorePrimarySources s
+		WHERE
+			t.ArtistID = a.ArtistID AND
+			t.PrimarySourceID = s.PrimarySourceID AND
+			s.StringID = 'MusicLibrarySource-Library'
+			$zero
+		ORDER BY
+			TrackID
+	} );
+	$sth->execute();
+
+	my $progress = Term::ProgressBar->new( { count => $total, name => "checked", ETA => "linear" } );
+
+	while( my $row = $sth->fetchrow_hashref ) {
+		my $response = undef;
+		try {
+			$response = lastfm(
+				"track.getInfo",
+				username => $self->username,
+				artist => $row->{ "Name" },
+				track  => $row->{ "Title" },
+			);
+		};
+		#
+		# check if there is match
+		#
+		if( ref $response eq "HASH" && exists $response->{ "track"} ) {
+
+			my $lastfm_count = $response->{ "track"}->{ "userplaycount" };
+			unless( is_int( $lastfm_count ) ) {
+				$lastfm_count = 0;
+			}
+			say "Found track $counter (${\$row->{TrackID}}) with ${ \$row->{ Name }}:${\$row->{ Title }}, play count: ${\$row->{ PlayCount}}" if $self->debug;
+			say "Last.fm match is ${\$response->{ track }->{ artist }->{ name }}:${\$response->{ track }->{ name }}, play count: $lastfm_count" if $self->debug;
+			#
+			# compare playcount
+			#
+
+			if( $row->{ "PlayCount"} < $lastfm_count ) {
+				say "Banshee play count lower than last.fm play count: ${\$row->{ PlayCount}} < $lastfm_count" if $self->debug;
+				print "Updating playcount..." if $self->debug;
+				#
+				#
+				#
+				$dbh->do( sprintf( "UPDATE CoreTracks SET PlayCount = %d WHERE TrackID = %d",
+					$lastfm_count,
+					$row->{ "TrackID"}
+				) );
+				say "done." if $self->debug;
+			}
+		}
+		$progress->update( $counter++ );
+	}
+	$dbh->disconnect();
+}
+
+no Moose;
+1;
+
+package main;
+
+use common::sense;
+=pod cmndline
+
+--key=b25b959554ed76058ac220b7b2e0a026 --username=<lastfm-username>
+
+=cut
+
+my $client = Banshee::LastFm::Sync->new_with_options();
+$client->backup();
+$client->sync;
+
+1;
