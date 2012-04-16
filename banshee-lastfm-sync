@@ -67,7 +67,9 @@ sub sync {
 	# independent counter
 	#
 	my $counter = 1;
-	my $total = 0;
+	my $total   = 0;
+	my $changed = 0;
+
 
 	#
 	# only tracks with 0 playcount
@@ -167,12 +169,14 @@ sub sync {
 					$lastfm_count,
 					$row->{ "TrackID"}
 				) );
+				$changed++;
 				say "done." if $self->debug;
 			}
 		}
 		$progress->update( $counter++ );
 	}
 	$dbh->disconnect();
+	say "Updated $changed tracks of $total total tracks";
 }
 
 no Moose;
