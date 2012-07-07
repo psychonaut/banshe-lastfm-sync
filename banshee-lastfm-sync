@@ -1,5 +1,8 @@
 #!/usr/bin/env perl
 
+use utf8;
+binmode STDOUT, ":utf8";
+
 package Banshee::LastFm::Sync;
 
 use Data::Dump;
@@ -169,7 +172,7 @@ sub sync {
 		my $artist = $libTrack->{"artist"}->{"name"};
 		my $track = $libTrack->{"name"};
 
-		$libTracks->{$artist}->{$track}->{"playcount"} = $libTrack->{"playcount"};
+		$libTracks->{lc $artist}->{lc $track}->{"playcount"} = $libTrack->{"playcount"};
 
 		$libProgress->update($libCounter++);
 	}
@@ -200,7 +203,7 @@ sub sync {
 			my $artist = $libTrack->{"artist"}->{"name"};
 			my $track = $libTrack->{"name"};
 
-			$libTracks->{$artist}->{$track}->{"loved"} = 1;
+			$libTracks->{lc $artist}->{lc $track}->{"loved"} = 1;
 
 			$lovedProgress->update($lovedCounter++);
 		}
@@ -210,7 +213,7 @@ sub sync {
 
 	while( my $row = $sth->fetchrow_hashref ) {
 		my $trackInfo = defined $row->{ "Name" } && defined $row->{ "Title" } ? 
-			$libTracks->{ $row->{ "Name" } }->{ $row->{ "Title" }  } 
+			$libTracks->{ lc $row->{ "Name" } }->{ lc $row->{ "Title" }  } 
 			: '';
 
 		#
