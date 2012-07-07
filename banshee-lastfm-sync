@@ -7,7 +7,6 @@ use Data::Dump;
 use common::sense;
 use Net::LastFMAPI;
 use Data::Types qw(:int);
-use Data::Dumper;
 use DBI;
 use Try::Tiny;
 use Term::ProgressBar;
@@ -162,7 +161,7 @@ sub sync {
 		exit(1);
 	}
 
-	my $libProgress = Term::ProgressBar->new( { count => $Net::LastFMAPI::last_response->{"tracks"}->{"\@attr"}->{"total"}, name => "Library tracks fetched", ETA => "linear" } );
+	my $libProgress = Term::ProgressBar->new( { count => $Net::LastFMAPI::last_response->{"tracks"}->{"\@attr"}->{"total"}, name => "Fetching Last.fm library", ETA => "linear" } );
 
 	my $libTracks = {};
 
@@ -186,7 +185,7 @@ sub sync {
 			$lovedResponse = lastfm_iter(
 				"user.getLovedTracks",
 				user => $self->username,
-				limit => 200
+				limit => 250
 			);
 		};
 
@@ -195,7 +194,7 @@ sub sync {
 			exit(1);
 		}
 
-		my $lovedProgress = Term::ProgressBar->new( { count => $Net::LastFMAPI::last_response->{"lovedtracks"}->{"\@attr"}->{"total"}, name => "Loved tracks fetched", ETA => "linear" } );
+		my $lovedProgress = Term::ProgressBar->new( { count => $Net::LastFMAPI::last_response->{"lovedtracks"}->{"\@attr"}->{"total"}, name => "Fetching Last.fm loved tracks", ETA => "linear" } );
 
 		while ( my $libTrack = $lovedResponse->() ) {
 			my $artist = $libTrack->{"artist"}->{"name"};
@@ -220,6 +219,8 @@ sub sync {
 		if( ref $trackInfo eq "HASH" ) {
 			my $track_changed = 0;
 
+			my $setFields = '';
+
 			my $lastfm_count = $trackInfo->{ "playcount"};
 			unless( is_int( $lastfm_count ) ) {
 				$lastfm_count = 0;
@@ -237,16 +238,13 @@ sub sync {
 			#
 			if( $row->{ "PlayCount"} < $lastfm_count ) {
 				say "\tBanshee play count lower than last.fm play count: ${\$row->{ PlayCount}} < $lastfm_count" if $self->debug;
-				print "\tUpdating playcount... " if $self->debug;
 				#
 				#
 				#
-				$dbh->do( sprintf( "UPDATE CoreTracks SET PlayCount = %d WHERE TrackID = %d",
-					$lastfm_count,
-					$row->{ "TrackID"}
-				) );
+				$setFields = $setFields . sprintf( ($setFields ? ", " : '') . "PlayCount = %d",
+					$lastfm_count
+				);
 				$track_changed = 1;
-				say "done." if $self->debug;
 			}
 
 
@@ -255,16 +253,22 @@ sub sync {
 			#
 			if ( $lastfm_loved eq 1 && $row->{ "TrackRating"} eq 0 ) {
 				say "\tBanshee unrated song is loved" if $self->debug;
-				print "\tUpdating rating to ${\$self->lovedrating} stars... " if $self->debug;
+				$setFields = $setFields . sprintf( ($setFields ? ", " : '') . "Rating = %d",
+					$self->lovedrating
+				);
+			}
+
+			if ( $setFields ) {
+				print "\tUpdating track... " if $self->debug;
 				#
 				#
 				#
-				$dbh->do( sprintf( "UPDATE CoreTracks SET Rating = %d WHERE TrackID = %d",
-					$self->lovedrating,
+				$dbh->do( sprintf("UPDATE CoreTracks SET ${setFields} WHERE TrackID = %d",
 					$row->{ "TrackID"}
 				) );
 				$track_changed = 1;
 				say "done." if $self->debug;
+
 			}
 
 			if ( $track_changed eq 1 ) {
