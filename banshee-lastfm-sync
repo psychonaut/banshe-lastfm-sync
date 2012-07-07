@@ -76,8 +76,8 @@ sub sync {
 	#
 	# allow only rating from 1 to 5
 	#
-	unless ( $self->lovedrating gt 0 && $self->lovedrating lt 6 ) {
-		say "Invalid rating '${\$self->lovedrating}'. A value between 1 and 5 is required.";
+	unless ( $self->lovedrating >= 1 && $self->lovedrating <= 5 ) {
+		say "Invalid rating '${\$self->lovedrating}'. A value from 1 to 5 is required.";
 		exit(1);
 	}
 
