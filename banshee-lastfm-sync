@@ -211,6 +211,8 @@ sub sync {
 
 	my $progress = Term::ProgressBar->new( { count => $total, name => "checked", ETA => "linear" } );
 
+	$dbh->do('BEGIN TRANSACTION');
+
 	while( my $row = $sth->fetchrow_hashref ) {
 		my $trackInfo = defined $row->{ "Name" } && defined $row->{ "Title" } ? 
 			$libTracks->{ lc $row->{ "Name" } }->{ lc $row->{ "Title" }  } 
@@ -282,6 +284,8 @@ sub sync {
 		}
 		$progress->update( $counter++ );
 	}
+
+	$dbh->do('COMMIT TRANSACTION');
 	$dbh->disconnect();
 	say "Updated $changed tracks of $total total tracks";
 }
