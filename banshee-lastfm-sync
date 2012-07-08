@@ -1,5 +1,8 @@
 #!/usr/bin/env perl
 
+use utf8;
+binmode STDOUT, ":utf8";
+
 package Banshee::LastFm::Sync;
 
 use Data::Dump;
@@ -20,8 +23,10 @@ has key => ( is => "rw", isa => "Str", required => 1 );
 has username => ( is => "rw", isa => "Str", required => 1 );
 has db => ( is => "rw", isa => "Str", required => 1 );
 has zero => ( is => "rw", isa => "Bool", required => 0, default => sub { 0 } );
+has updateloved => ( is=> "rw", isa => "Bool", required => 0, default => sub { 0 });
+has lovedrating => ( is => "rw", isa => "Int", required => 0, default => sub { 5 });
 has _config => ( is => "rw", lazy_build => 1, required => 0 );
-has _debug => ( is => "rw", isa => "Bool", default => sub{ 0 }, accessor => "debug" );
+has debug => ( is => "rw", isa => "Bool", default => sub{ 0 }, accessor => "debug" );
 
 __PACKAGE__->meta->make_immutable;
 binmode STDOUT, ":utf8";
@@ -70,6 +75,13 @@ sub sync {
 	my $total   = 0;
 	my $changed = 0;
 
+	#
+	# allow only rating from 1 to 5
+	#
+	unless ( $self->lovedrating >= 1 && $self->lovedrating <= 5 ) {
+		say "Invalid rating '${\$self->lovedrating}'. A value from 1 to 5 is required.";
+		exit(1);
+	}
 
 	#
 	# only tracks with 0 playcount
@@ -117,7 +129,8 @@ sub sync {
 	#
 	$sth = $dbh->prepare( qq{
 		SELECT
-			*
+			*,
+			t.Rating AS TrackRating
 		FROM
 			CoreTracks t,
 			CoreArtists a,
@@ -132,49 +145,147 @@ sub sync {
 	} );
 	$sth->execute();
 
-	my $progress = Term::ProgressBar->new( { count => $total, name => "checked", ETA => "linear" } );
+	#
+	# get library tracks and parse them so that we can get play counts faster
+	#
+	say "Fetching Last.fm library..." if $self->debug;
+	my $libResponse = undef;
+	my $libCounter = 0;
+	try {
+		$libResponse = lastfm_iter(
+			"library.getTracks",
+			user => $self->username,
+			limit => 250
+		);
+	};
 
-	while( my $row = $sth->fetchrow_hashref ) {
-		my $response = undef;
+	if ( !$libResponse ) {
+		say "Error: Could not fetch Last.fm user library.";
+		exit(1);
+	}
+
+	my $libProgress = Term::ProgressBar->new( { count => $Net::LastFMAPI::last_response->{"tracks"}->{"\@attr"}->{"total"}, name => "Fetching Last.fm library", ETA => "linear" } );
+
+	my $libTracks = {};
+
+	while ( my $libTrack = $libResponse->() ) {
+		my $artist = $libTrack->{"artist"}->{"name"};
+		my $track = $libTrack->{"name"};
+
+		$libTracks->{lc $artist}->{lc $track}->{"playcount"} = $libTrack->{"playcount"};
+
+		$libProgress->update($libCounter++);
+	}
+
+	#
+	# Fetch loved tracks list
+	#
+	if ( $self->updateloved ) {
+		say "Fetching Last.fm loved tracks..." if $self->debug;
+		my $lovedResponse = undef;
+		my $lovedCounter = 0;
 		try {
-			$response = lastfm(
-				"track.getInfo",
-				username => $self->username,
-				artist => $row->{ "Name" },
-				track  => $row->{ "Title" },
+			$lovedResponse = lastfm_iter(
+				"user.getLovedTracks",
+				user => $self->username,
+				limit => 250
 			);
 		};
+
+		if ( !$lovedResponse ) {
+			say "Error: Could not fetch Last.fm loved tracks.";
+			exit(1);
+		}
+
+		my $lovedProgress = Term::ProgressBar->new( { count => $Net::LastFMAPI::last_response->{"lovedtracks"}->{"\@attr"}->{"total"}, name => "Fetching Last.fm loved tracks", ETA => "linear" } );
+
+		while ( my $libTrack = $lovedResponse->() ) {
+			my $artist = $libTrack->{"artist"}->{"name"};
+			my $track = $libTrack->{"name"};
+
+			$libTracks->{lc $artist}->{lc $track}->{"loved"} = 1;
+
+			$lovedProgress->update($lovedCounter++);
+		}
+	}
+
+	my $progress = Term::ProgressBar->new( { count => $total, name => "checked", ETA => "linear" } );
+
+	$dbh->do('BEGIN TRANSACTION');
+
+	while( my $row = $sth->fetchrow_hashref ) {
+		my $trackInfo = defined $row->{ "Name" } && defined $row->{ "Title" } ? 
+			$libTracks->{ lc $row->{ "Name" } }->{ lc $row->{ "Title" }  } 
+			: '';
+
 		#
 		# check if there is match
 		#
-		if( ref $response eq "HASH" && exists $response->{ "track"} ) {
+		if( ref $trackInfo eq "HASH" ) {
+			my $track_changed = 0;
 
-			my $lastfm_count = $response->{ "track"}->{ "userplaycount" };
+			my $setFields = '';
+
+			my $lastfm_count = $trackInfo->{ "playcount"};
 			unless( is_int( $lastfm_count ) ) {
 				$lastfm_count = 0;
 			}
-			say "Found track $counter (${\$row->{TrackID}}) with ${ \$row->{ Name }}:${\$row->{ Title }}, play count: ${\$row->{ PlayCount}}" if $self->debug;
-			say "Last.fm match is ${\$response->{ track }->{ artist }->{ name }}:${\$response->{ track }->{ name }}, play count: $lastfm_count" if $self->debug;
+			
+			my $lastfm_loved = $trackInfo->{ "loved"};
+			unless ( is_int( $lastfm_loved) ) {
+				$lastfm_loved = 0;
+			}
+
+			say "Found track $counter (${\$row->{TrackID}}) with ${ \$row->{ Name }}:${\$row->{ Title }}, play count: ${\$row->{ PlayCount}}, rating: ${\$row->{ TrackRating}}" if $self->debug;
+			say "Last.fm match is ${\$row->{Name}}:${\$row->{Title}}, play count: $lastfm_count, loved: $lastfm_loved" if $self->debug;
 			#
 			# compare playcount
 			#
-
 			if( $row->{ "PlayCount"} < $lastfm_count ) {
-				say "Banshee play count lower than last.fm play count: ${\$row->{ PlayCount}} < $lastfm_count" if $self->debug;
-				print "Updating playcount..." if $self->debug;
+				say "\tBanshee play count lower than last.fm play count: ${\$row->{ PlayCount}} < $lastfm_count" if $self->debug;
 				#
 				#
 				#
-				$dbh->do( sprintf( "UPDATE CoreTracks SET PlayCount = %d WHERE TrackID = %d",
-					$lastfm_count,
+				$setFields = $setFields . sprintf( ($setFields ? ", " : '') . "PlayCount = %d",
+					$lastfm_count
+				);
+				$track_changed = 1;
+			}
+
+
+			#
+			# add 5 stars for a loved track if rating not set
+			#
+			if ( $lastfm_loved eq 1 && $row->{ "TrackRating"} eq 0 ) {
+				say "\tBanshee unrated song is loved" if $self->debug;
+				$setFields = $setFields . sprintf( ($setFields ? ", " : '') . "Rating = %d",
+					$self->lovedrating
+				);
+			}
+
+			if ( $setFields ) {
+				print "\tUpdating track... " if $self->debug;
+				#
+				#
+				#
+				$dbh->do( sprintf("UPDATE CoreTracks SET ${setFields} WHERE TrackID = %d",
 					$row->{ "TrackID"}
 				) );
-				$changed++;
+				$track_changed = 1;
 				say "done." if $self->debug;
+
 			}
+
+			if ( $track_changed eq 1 ) {
+				$changed++;
+			}
+
+			say "done." if $self->debug;
 		}
 		$progress->update( $counter++ );
 	}
+
+	$dbh->do('COMMIT TRANSACTION');
 	$dbh->disconnect();
 	say "Updated $changed tracks of $total total tracks";
 }
